@@ -14,24 +14,54 @@ class OpenAPIer:
         """
         self.parser = ResolvingParser(spec_url, backend='openapi-spec-validator')
         self.base_url = self.parser.specification.get('servers', [{}])[0].get('url', '')
-        self.interfaces = self._parse_interfaces()
         self.host_domain = "{0}://{1}".format(*urlparse(spec_url)[:2])
+        self.interfaces = self._parse_interfaces()
 
     def _parse_interfaces(self) -> List[Dict]:
         """解析 OpenAPI 文档获取所有接口信息"""
         interfaces = []
         paths = self.parser.specification.get('paths', {})
+        # Construct the base URL
+        base_url = f"{self.host_domain.rstrip('/')}/{self.base_url.lstrip('/')}"
 
         for path, methods in paths.items():
             for method, details in methods.items():
                 if method.lower() in ['get', 'post', 'put', 'delete', 'patch']:
-                    interfaces.append({
-                        'path': path,
+                    # 根据base_url与path构造接口的url
+                    url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+                    # 提取 requestBody 信息
+                    request_body = details.get('requestBody', {})
+                    request_body_info = None
+                    if request_body:
+                        # 解析通用约束和 content
+                        request_body_info = {
+                            "required": request_body.get("required", False),
+                            "content": {}
+                        }
+                        # 遍历所有支持的媒体类型（如 application/json）
+                        for content_type, content_def in request_body.get("content", {}).items():
+                            # 提取 schema（可能包含直接定义或已解析的 $ref）
+                            schema = content_def.get("schema", {})
+                            request_body_info["content"][content_type] = schema
+                    # 构造接口信息
+                    interface = {
+                        'url': url,
                         'method': method.upper(),
-                        'parameters': details.get('parameters', []),
                         'summary': details.get('summary', 'No summary'),
                         'operationId': details.get('operationId', '')
-                    })
+                    }
+
+                    # 如果 parameters 不为空，则添加到接口信息
+                    parameters = details.get('parameters', [])
+                    if parameters:
+                        interface['parameters'] = parameters
+
+                    # 如果 request_body_info 不为 None，则添加到接口信息
+                    if request_body_info:
+                        interface['requestBody'] = request_body_info
+
+                    # 将接口描述添加到List中
+                    interfaces.append(interface)
         return interfaces
 
 
@@ -86,43 +116,40 @@ async def call_api(
 
 @mcp.tool()
 async def get_all_interfaces(verbose: bool = False):
-    """Get all API interfaces from OpenAPI document.
+    """
+    Retrieve all API interfaces from the OpenAPI document.
 
     Args:
-        verbose: 是否显示详细信息 (默认为False)
+        verbose (bool): Whether to display detailed information (default is False).
 
     Returns:
-        list: 当verbose=True时返回完整接口详细信息，否则返回包含Function摘要的列表
+        list: If verbose=True, returns the complete interface details.
+              Otherwise, returns a list containing only the function summaries.
     """
-
     if verbose:
         return OPENER.interfaces
     return [{'Function': item['summary']} for item in OPENER.interfaces]
 
 
 @mcp.tool()
-async def get_detail_interface(summary: str) -> list[dict]:
+async def get_detail_interface(summary: str) -> dict | None:
     """
-    Get the detail of an API interface based on its summary.
+    Retrieve the details of the first API interface that matches the given summary.
 
     Args:
-        summary (str): The summary description of the interface.
+        summary (str): A substring to search for in the interface summary description.
 
     Returns:
-        list[dict]: A list of matching interfaces with their host and function details.
+        dict: The first matching interface with its details.
+              If no match is found, returns None.
     """
+    # Iterate through the available interfaces and perform case-insensitive fuzzy matching
+    for item in OPENER.interfaces:
+        if summary.lower() in item.get('summary', '').lower():
+            return item
 
-    # Construct the base URL
-    base_url = f"{OPENER.host_domain.rstrip('/')}/{OPENER.base_url.lstrip('/')}"
-
-    # Filter and return matching items using fuzzy matching (substring check)
-    matching_items = [
-        {'Host': base_url, 'Function': item}
-        for item in OPENER.interfaces
-        if summary.lower() in item.get('summary', '').lower()
-    ]
-
-    return matching_items
+    # Return None if no matching interface is found
+    return None
 
 
 if __name__ == "__main__":
